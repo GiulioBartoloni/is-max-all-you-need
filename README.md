@@ -1,10 +1,5 @@
 ![Cover](various/cover.png)
 
-> From-scratch re-implementation of **SPLADE** with a **learnable pooling family** (max · sum · p-norm · attention) — an expert-level study of whether max pooling is actually optimal for sparse neural retrieval.
-
-Information Retrieval course project · University of Pisa · Giulio Bartoloni
-
----
 
 ## About
 
