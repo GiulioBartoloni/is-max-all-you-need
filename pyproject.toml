@@ -1,0 +1,22 @@
+[project]
+name = "is-max-all-you-need"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "ir-datasets>=0.6.1",
+    "ir-measures>=0.4.3",
+    "numpy>=2.5.1",
+    "torch>=2.13.0",
+    "tqdm>=4.68.4",
+    "transformers>=5.13.1",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
