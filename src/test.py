@@ -153,3 +153,102 @@ if __name__ == "__main__":
     print("=" * 60)
     passed = sum(1 for _, ok, _ in _results if ok)
     print(f"{passed}/{len(_results)} passed")
+    
+    
+print("#"*80)
+
+from model import Splade
+
+model = Splade("max")          # try "p-norm" too later
+model.eval()                   # eval mode = no dropout, for the determinism check
+
+V = model.backbone.config.vocab_size
+print("vocab_size:", V)        # expect 30522
+
+# fake token IDs — MUST be valid ids (0..V) and integer type
+B, S = 2, 6
+ids  = torch.randint(0, V, (B, S))
+mask = torch.ones(B, S, dtype=torch.long)
+
+# --- encode shape + sparsity ---
+q = model.encode(ids, mask, "query")
+print("encode shape:", q.shape)                 # expect (2, 30522)
+print("nonzero frac:", (q != 0).float().mean().item())   # expect small (sparse), not ~1.0
+
+# --- determinism (eval mode) ---
+q2 = model.encode(ids, mask, "query")
+print("deterministic:", torch.allclose(q, q2))  # expect True in eval mode
+
+# --- score now takes two ENCODED vectors, not raw IDs ---
+q = model.encode(ids, mask, "query")
+d = model.encode(ids, mask, "doc")
+s = model.score(q, d)
+print("score shape:", s.shape)                  # expect (2,)
+
+# --- forward still takes the raw IDs/masks (3 pairs: query, pos, neg) ---
+pos, neg = model(ids, mask, ids, mask, ids, mask)
+print("forward:", pos.shape, neg.shape)          # expect (2,) (2,)
+
+# --- gradient reaches BOTH backbone and pooling ---
+model.train()
+pos, neg = model(ids, mask, ids, mask, ids, mask)
+loss = (pos - neg).mean()
+loss.backward()
+backbone_grad = any(p.grad is not None and p.grad.abs().sum() > 0
+                    for p in model.backbone.parameters())
+print("backbone got grad:", backbone_grad)       # expect True
+
+
+from transformers import AutoTokenizer
+tok = AutoTokenizer.from_pretrained("distilbert-base-uncased")
+enc = tok("a cat sat on the mat", return_tensors="pt")
+model.eval()
+vec = model.encode(enc["input_ids"], enc["attention_mask"], "doc")[0]
+topk = vec.topk(10)
+print([tok.decode([i]) for i in topk.indices])   # should show 'cat','mat',... PLUS related words not in the sentence
+
+print("#"*80)
+
+import torch
+from loss import margin_mse, flops, SpladeLoss
+
+# --- margin_mse: zero when student margin == teacher margin ---
+pos = torch.tensor([3.0, 2.0]); neg = torch.tensor([1.0, 0.5])
+tpos = torch.tensor([5.0, 4.0]); tneg = torch.tensor([3.0, 2.5])
+# student margins: [2.0, 1.5]; teacher margins: [2.0, 1.5]  -> equal -> ~0
+print("marginMSE (match):", margin_mse(pos, neg, tpos, tneg).item())     # ~0.0
+
+# mismatch should be larger
+tpos2 = torch.tensor([10.0, 10.0])
+print("marginMSE (mismatch):", margin_mse(pos, neg, tpos2, tneg).item())  # > 0
+
+# --- flops: dense > sparse ---
+sparse = torch.zeros(4, 100); sparse[:, 0] = 0.1
+dense  = torch.ones(4, 100)
+print("flops sparse:", flops(sparse).item(), " dense:", flops(dense).item())  # dense >> sparse
+
+# --- flops: concentrated (same term everywhere) > spread (different terms) ---
+concentrated = torch.zeros(4, 100); concentrated[:, 0] = 1.0     # term 0 in every doc
+spread = torch.zeros(4, 100)
+for i in range(4): spread[i, i] = 1.0                            # a different term per doc
+print("flops concentrated:", flops(concentrated).item(), " spread:", flops(spread).item())
+# concentrated should be LARGER -> proves FLOPS penalizes posting-list length
+
+# --- SpladeLoss: lambda=0 reduces to pure ranking ---
+qv = torch.rand(2, 100); dv = torch.rand(2, 100)
+loss0 = SpladeLoss(0.0, 0.0)
+total0, *_ = loss0(pos, neg, tpos, tneg, qv, dv)
+rank_only = margin_mse(pos, neg, tpos, tneg)
+print("lambda=0 total == ranking:", torch.allclose(total0, rank_only))   # True
+
+# --- lambda effect: bigger lambda -> bigger total ---
+big = SpladeLoss(10.0, 10.0)
+total_big, *_ = big(pos, neg, tpos, tneg, qv, dv)
+print("bigger lambda -> bigger total:", total_big.item() > total0.item())  # True
+
+# --- gradient flows ---
+qv2 = torch.rand(2, 100, requires_grad=True)
+dv2 = torch.rand(2, 100, requires_grad=True)
+t, *_ = SpladeLoss(1.0, 1.0)(pos, neg, tpos, tneg, qv2, dv2)
+t.backward()
+print("grad flows:", qv2.grad is not None and torch.isfinite(qv2.grad).all().item())  # True
