@@ -32,4 +32,4 @@ class Splade(torch.nn.Module):
         positive_score = self.score(encoded_query, encoded_positive_doc)
         negative_score = self.score(encoded_query, encoded_negative_doc)
         
-        return positive_score, negative_score, encoded_query, encoded_positive, encoded_negative
+        return positive_score, negative_score, encoded_query, encoded_positive_doc, encoded_negative_doc
