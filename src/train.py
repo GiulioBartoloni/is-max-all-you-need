@@ -41,21 +41,21 @@ from data import make_dataloader
 class Config:
     # --- experiment knobs (what changes across the grid) ---
     variant: str = "max"            # sum | max | p-norm | attention
-    lambda_q: float = 3e-4          # query FLOPS weight (target, post-warmup)
-    lambda_d: float = 3e-4          # doc   FLOPS weight (target, post-warmup)
+    lambda_q: float = 3e-4
+    lambda_d: float = 3e-4
     seed: int = 1
 
     # --- schedule ---
-    max_steps: int = 35000          # optimizer steps (paper regime: 30-40k)
+    max_steps: int = 35000
     warmup_steps: int = 10000       # linear lambda ramp 0 -> target
-    batch_size: int = 32            # micro-batch that actually hits the GPU
-    accum_steps: int = 1            # gradient accumulation; effective batch = batch_size * accum_steps
+    batch_size: int = 32
+    accum_steps: int = 1            # effective batch = batch_size * accum_steps
     lr: float = 1e-4
-    max_grad_norm: float = 1.0      # grad clipping (set <= 0 to disable)
+    max_grad_norm: float = 1.0
 
     # --- tokenization / data volume ---
     max_length: int = 128
-    max_triples: int = 2_000_000    # teacher triples loaded into RAM (see note in load_triples)
+    max_triples: int = 2_000_000    # cap triples loaded into RAM
 
     # --- fixed model ---
     backbone: str = "distilbert-base-uncased"
@@ -64,41 +64,104 @@ class Config:
     log_every: int = 100
     checkpoint_every: int = 1000
 
-    # --- paths / datasets ---
-    ir_datasets_home: str = "/kaggle/input/msmarco-ir-datasets"
-    collection: str = "msmarco-passage"
-    train_dataset: str = "msmarco-passage/train"
-    teacher_path: str = "/kaggle/input/teacher-scores/bert_cat_ensemble_msmarcopassage_train_scores_ids.tsv"
+    # --- paths (Kaggle layout after confirmed data setup) ---
+    collection_tsv: str = (
+        "/kaggle/input/datasets/giuliobartolonids/splade-data/irds/"
+        "msmarco-passage/collectionandqueries/collection.tsv"
+    )
+    train_queries_tsv: str = (
+        "/kaggle/input/datasets/giuliobartolonids/splade-data/irds/"
+        "msmarco-passage/collectionandqueries/queries.train.tsv"
+    )
+    teacher_path: str = (
+        "/kaggle/input/datasets/giuliobartolonids/splade-data/teacher.tsv"
+    )
     checkpoint_path: str = ""       # derived from run identity if left empty
     working_dir: str = "/kaggle/working"
 
     def resolved_checkpoint_path(self) -> str:
-        # A per-run default so grid runs never clobber each other's checkpoints.
         if self.checkpoint_path:
             return self.checkpoint_path
-        name = f"ckpt_{self.variant}_lq{self.lambda_q:g}_ld{self.lambda_d:g}_seed{self.seed}.pt"
+        name = (
+            f"ckpt_{self.variant}"
+            f"_lq{self.lambda_q:g}_ld{self.lambda_d:g}"
+            f"_seed{self.seed}.pt"
+        )
         return os.path.join(self.working_dir, name)
 
 
 # --------------------------------------------------------------------------
-# Call-site data adapters (belong here per the handoff, not in data.py)
+# Data adapters — direct TSV reads, no ir_datasets dependency
 # --------------------------------------------------------------------------
-class DocstoreWrapper:
-    """Make an ir_datasets docstore behave like doc_lookup[pid] -> text."""
-    def __init__(self, docstore):
-        self.ds = docstore
+class TsvDocstore:
+    """Random-access docstore built from collection.tsv (pid TAB text).
+
+    Builds a byte-offset index on first access (~2 min for 8.8M docs).
+    Optionally saves/loads the index to/from a pickle file to skip
+    the build step on subsequent sessions.
+    """
+
+    def __init__(self, collection_path, index_cache=None):
+        self._path = collection_path
+        self._index_cache = index_cache   # path to save/load the pickle index
+        self._index = {}
+        self._built = False
+
+    def _build(self):
+        # try loading from cache first
+        if self._index_cache and os.path.exists(self._index_cache):
+            import pickle
+            with open(self._index_cache, "rb") as f:
+                self._index = pickle.load(f)
+            self._built = True
+            print(f"docstore index loaded from cache ({len(self._index):,} docs)")
+            return
+
+        print("building docstore offset index (~2 min)...")
+        t0 = time.time()
+        with open(self._path, "rb") as f:
+            while True:
+                offset = f.tell()
+                line = f.readline()
+                if not line:
+                    break
+                pid = line.split(b"\t", 1)[0].decode().strip()
+                self._index[pid] = offset
+        self._built = True
+        print(f"index built: {len(self._index):,} docs in {time.time()-t0:.0f}s")
+
+        if self._index_cache:
+            import pickle
+            with open(self._index_cache, "wb") as f:
+                pickle.dump(self._index, f)
+            print(f"index cached -> {self._index_cache}")
 
     def __getitem__(self, pid):
-        return self.ds.get(pid).text
+        if not self._built:
+            self._build()
+        with open(self._path, "rb") as f:
+            f.seek(self._index[str(pid)])
+            line = f.readline().decode()
+            _, text = line.split("\t", 1)
+            return text.strip()
+
+
+def load_query_lookup(tsv_path):
+    """Build {qid: text} dict from a queries.*.tsv file."""
+    lookup = {}
+    with open(tsv_path) as f:
+        for line in f:
+            parts = line.strip().split("\t")
+            if len(parts) >= 2:
+                lookup[parts[0]] = parts[1]
+    return lookup
 
 
 def load_triples(path, max_triples=None):
-    """Parse the Hofstatter teacher TSV:
-        pos_score \t neg_score \t qid \t pos_pid \t neg_pid
+    """Parse Hofstatter teacher TSV: pos_score TAB neg_score TAB qid TAB pos_pid TAB neg_pid.
 
-    max_triples caps how many lines are read. 35k steps * batch 32 ~= 1.12M
-    triples per pass, so the 2M default gives shuffle diversity without loading
-    all ~40M lines into RAM. Raise it for wider coverage at RAM/time cost.
+    max_triples caps lines read into RAM. 35k steps * batch 32 ~ 1.12M
+    triples per pass, so 2M gives shuffle diversity without loading all 40M.
     """
     triples = []
     with open(path) as f:
@@ -123,7 +186,8 @@ def set_seed(seed):
 
 
 def to_device(batch, device):
-    return {k: v.to(device) if torch.is_tensor(v) else v for k, v in batch.items()}
+    return {k: v.to(device) if torch.is_tensor(v) else v
+            for k, v in batch.items()}
 
 
 def save_checkpoint(path, step, model, optimizer, losses, cfg):
@@ -132,7 +196,7 @@ def save_checkpoint(path, step, model, optimizer, losses, cfg):
         "model_state": model.state_dict(),
         "optimizer_state": optimizer.state_dict(),
         "losses": losses,
-        "config": asdict(cfg),   # lets index.py/evaluate.py rebuild Splade(variant)
+        "config": asdict(cfg),
     }, path)
 
 
@@ -150,45 +214,50 @@ def append_log_row(csv_path, row):
 # Training
 # --------------------------------------------------------------------------
 def run_training(cfg: Config):
-    print(f"=== SPLADE training: variant={cfg.variant} "
-          f"lambda_q={cfg.lambda_q:g} lambda_d={cfg.lambda_d:g} seed={cfg.seed} ===")
+    print(
+        f"=== SPLADE training: variant={cfg.variant} "
+        f"lambda_q={cfg.lambda_q:g} lambda_d={cfg.lambda_d:g} "
+        f"seed={cfg.seed} ==="
+    )
     set_seed(cfg.seed)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print("device:", device)
+    print("device:", device,
+          f"({torch.cuda.get_device_name(0)})" if device == "cuda" else "")
 
-    # ir_datasets resolves its home dir from this env var; set it before use.
-    os.environ["IR_DATASETS_HOME"] = cfg.ir_datasets_home
-    import ir_datasets  # local import so the env var above is honored
-
-    # --- data sources ---
     tokenizer = AutoTokenizer.from_pretrained(cfg.backbone)
 
+    # --- docstore (with session-level cache to skip the 2-min rebuild) ---
+    index_cache = os.path.join(cfg.working_dir, "docstore_index.pkl")
+    doc_lookup = TsvDocstore(cfg.collection_tsv, index_cache=index_cache)
+    doc_lookup._build()   # build/load now so timing is visible before training
+
+    # --- query lookup ---
     t0 = time.time()
-    print("building query lookup ...")
-    query_lookup = {q.query_id: q.text
-                    for q in ir_datasets.load(cfg.train_dataset).queries_iter()}
-    print(f"  {len(query_lookup)} queries in {time.time() - t0:.0f}s")
+    print("loading train queries ...")
+    query_lookup = load_query_lookup(cfg.train_queries_tsv)
+    print(f"  {len(query_lookup):,} queries in {time.time()-t0:.0f}s")
 
-    docstore = ir_datasets.load(cfg.collection).docs_store()
-    doc_lookup = DocstoreWrapper(docstore)
-
+    # --- teacher triples ---
     t0 = time.time()
     print("loading teacher triples ...")
     triples = load_triples(cfg.teacher_path, max_triples=cfg.max_triples)
-    print(f"  {len(triples)} triples in {time.time() - t0:.0f}s")
+    print(f"  {len(triples):,} triples in {time.time()-t0:.0f}s")
 
-    loader = make_dataloader(triples, query_lookup, doc_lookup,
-                             tokenizer, batch_size=cfg.batch_size, shuffle=True)
+    loader = make_dataloader(
+        triples, query_lookup, doc_lookup,
+        tokenizer,
+        batch_size=cfg.batch_size,
+        shuffle=True,
+        max_length=cfg.max_length,
+    )
 
     # --- model / loss / optim ---
     model = Splade(cfg.variant).to(device)
-    # loss_fn's own lambdas are unused: we take its three live component tensors
-    # and rebuild `total` with the warmed-up lambdas each step (see loop below).
     loss_fn = SpladeLoss(cfg.lambda_q, cfg.lambda_d)
     optimizer = AdamW(model.parameters(), lr=cfg.lr)
 
-    # --- resume ---
+    # --- resume from checkpoint if one exists ---
     ckpt_path = cfg.resolved_checkpoint_path()
     log_csv = ckpt_path.rsplit(".", 1)[0] + "_log.csv"
     start_step, losses = 0, []
@@ -201,10 +270,10 @@ def run_training(cfg: Config):
         print(f"resumed from step {start_step}")
 
     if start_step >= cfg.max_steps:
-        print("checkpoint already at/past max_steps; nothing to do.")
+        print("already at max_steps; nothing to do.")
         return ckpt_path
 
-    # --- loop ---
+    # --- training loop ---
     model.train()
     step = start_step
     micro = 0
@@ -215,48 +284,55 @@ def run_training(cfg: Config):
         for batch in loader:
             batch = to_device(batch, device)
 
-            # forward: query encoded once, pos/neg encoded; returns scores AND
-            # sparse vectors (the FLOPS regularizer needs the vectors).
+            # encode query once, pos and neg separately
             pos_score, neg_score, q_vec, pos_vec, neg_vec = model(
                 batch["query_input_ids"], batch["query_attention_mask"],
                 batch["pos_input_ids"],   batch["pos_attention_mask"],
                 batch["neg_input_ids"],   batch["neg_attention_mask"],
             )
 
-            # pos and neg are both documents in the index -> both regularized.
-            # Stack before the loss's per-term cross-doc mean (correct population).
+            # stack pos+neg doc vectors — both are documents in the index
             doc_vecs = torch.cat([pos_vec, neg_vec], dim=0)
 
-            # Ignore loss_fn's internal `total`; rebuild it with warmed lambdas so
-            # the FLOPS penalty ramps in instead of collapsing the loss at step 0.
+            # rebuild total with warmed lambdas (prevents 3M loss spike at step 0)
             _total, ranking, flops_q, flops_d = loss_fn(
                 pos_score, neg_score,
                 batch["teacher_pos"], batch["teacher_neg"],
                 q_vec, doc_vecs,
             )
-
-            warm = 1.0 if cfg.warmup_steps <= 0 else min(1.0, (step + 1) / cfg.warmup_steps)
-            lq, ld = cfg.lambda_q * warm, cfg.lambda_d * warm
+            warm = 1.0 if cfg.warmup_steps <= 0 else min(
+                1.0, (step + 1) / cfg.warmup_steps
+            )
+            lq = cfg.lambda_q * warm
+            ld = cfg.lambda_d * warm
             loss = ranking + lq * flops_q + ld * flops_d
 
             (loss / cfg.accum_steps).backward()
             micro += 1
             if micro % cfg.accum_steps != 0:
-                continue  # keep accumulating gradient; don't step yet
+                continue
 
             if cfg.max_grad_norm > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), cfg.max_grad_norm
+                )
             optimizer.step()
             optimizer.zero_grad()
             step += 1
 
             if step % cfg.log_every == 0:
-                row = (step, loss.item(), ranking.item(),
-                       flops_q.item(), flops_d.item(), lq)
+                row = (
+                    step, loss.item(), ranking.item(),
+                    flops_q.item(), flops_d.item(), lq,
+                )
                 losses.append(row)
                 append_log_row(log_csv, row)
-                print(f"step {step:>6} | total {row[1]:.4f} | rank {row[2]:.4f} "
-                      f"| flops_q {row[3]:.2f} | flops_d {row[4]:.2f} | lambda {lq:.2e}")
+                print(
+                    f"step {step:>6} | total {row[1]:.4f} "
+                    f"| rank {row[2]:.4f} "
+                    f"| flops_q {row[3]:.2f} | flops_d {row[4]:.2f} "
+                    f"| lambda {lq:.2e}"
+                )
 
             if step % cfg.checkpoint_every == 0:
                 save_checkpoint(ckpt_path, step, model, optimizer, losses, cfg)
@@ -267,20 +343,24 @@ def run_training(cfg: Config):
                 break
 
     save_checkpoint(ckpt_path, step, model, optimizer, losses, cfg)
-    print(f"training complete @ step {step}; final checkpoint -> {ckpt_path}")
+    print(f"training complete @ step {step} -> {ckpt_path}")
     return ckpt_path
 
 
 # --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
-_INT_FIELDS = {"max_steps", "warmup_steps", "batch_size", "accum_steps",
-               "max_length", "max_triples", "seed", "log_every", "checkpoint_every"}
+_INT_FIELDS = {
+    "max_steps", "warmup_steps", "batch_size", "accum_steps",
+    "max_length", "max_triples", "seed", "log_every", "checkpoint_every",
+}
 _FLOAT_FIELDS = {"lambda_q", "lambda_d", "lr", "max_grad_norm"}
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Train SPLADE for the pooling study.")
+    p = argparse.ArgumentParser(
+        description="Train SPLADE for the pooling study."
+    )
     defaults = Config()
     for f in fields(Config):
         if f.name in _INT_FIELDS:
