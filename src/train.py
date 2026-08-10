@@ -280,6 +280,11 @@ def run_training(cfg: Config):
         ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model_state"])
         optimizer.load_state_dict(ckpt["optimizer_state"])
+        # load_state_dict restores the SAVED lrs -- re-apply the configured ones
+        optimizer.param_groups[0]["lr"] = cfg.lr
+        if len(optimizer.param_groups) > 1:
+            optimizer.param_groups[1]["lr"] = cfg.p_lr
+        print("lr after load:", [g["lr"] for g in optimizer.param_groups])
         start_step = ckpt["step"]
         losses = ckpt.get("losses", [])
         print(f"resumed from step {start_step}")
