@@ -308,6 +308,11 @@ def run_training(cfg: Config):
             loss = ranking + lq * flops_q + ld * flops_d
 
             (loss / cfg.accum_steps).backward()
+
+            #TEMP
+            if step % 20 == 0 and hasattr(model.qiery_pool, "p"):
+                print(f"step {step} | p_q={model.query_pool.p.item():.6f} | grad_q={model.query_pool.p.grad:.6f} | p_d={model.doc_pool.p.item():.6f} | grad_d={model.doc_pool.p.grad:.6f} |")
+
             micro += 1
             if micro % cfg.accum_steps != 0:
                 continue
