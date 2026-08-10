@@ -337,6 +337,10 @@ def run_training(cfg: Config):
                     model.parameters(), cfg.max_grad_norm
                 )
             optimizer.step()
+
+            with torch.no_grad():
+                for param in p_params:
+                    param.clamp_(min=0.5)
             optimizer.zero_grad()
             step += 1
 
