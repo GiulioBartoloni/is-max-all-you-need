@@ -201,7 +201,7 @@ def save_checkpoint(path, step, model, optimizer, losses, cfg):
 
 
 def append_log_row(csv_path, row):
-    header = ["step", "total", "ranking", "flops_q", "flops_d", "lambda"]
+    header = ["step", "total", "ranking", "flops_q", "flops_d", "lambda", "p_q", "p_d"]
     exists = os.path.exists(csv_path)
     with open(csv_path, "a", newline="") as fh:
         w = csv.writer(fh)
@@ -321,9 +321,11 @@ def run_training(cfg: Config):
             step += 1
 
             if step % cfg.log_every == 0:
+                p_q = model.query_pool.p.item()
+                p_d = model.doc_pool.p.item()
                 row = (
                     step, loss.item(), ranking.item(),
-                    flops_q.item(), flops_d.item(), lq,
+                    flops_q.item(), flops_d.item(), lq, p_q, p_d
                 )
                 losses.append(row)
                 append_log_row(log_csv, row)
@@ -331,7 +333,7 @@ def run_training(cfg: Config):
                     f"step {step:>6} | total {row[1]:.4f} "
                     f"| rank {row[2]:.4f} "
                     f"| flops_q {row[3]:.2f} | flops_d {row[4]:.2f} "
-                    f"| lambda {lq:.2e}"
+                    f"| lambda {lq:.2e} | p_q {p_q:.3f} | p_d {p_d:.3f}"
                 )
 
             if step % cfg.checkpoint_every == 0:
