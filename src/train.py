@@ -51,6 +51,7 @@ class Config:
     batch_size: int = 32
     accum_steps: int = 1            # effective batch = batch_size * accum_steps
     lr: float = 1e-4
+    p_lr: float = 1e-3
     max_grad_norm: float = 1.0
 
     # --- tokenization / data volume ---
@@ -255,7 +256,21 @@ def run_training(cfg: Config):
     # --- model / loss / optim ---
     model = Splade(cfg.variant).to(device)
     loss_fn = SpladeLoss(cfg.lambda_q, cfg.lambda_d)
-    optimizer = AdamW(model.parameters(), lr=cfg.lr)
+    p_params, base_params = [], []
+    for name, param in model.named_parameters():
+        if name in ("query_pool.p", "doc_pool.p"):
+            p_params.append(param)
+        else:
+            base_params.append(param)
+
+    if p_params:
+        optimizer= AdamW([
+            {"params": base_params, "lr": cfg.lr},
+            {"params": p_params, "lr": cfg.p_lr},
+        ])
+        print(f"separate lr for p: {cfg.p_lr}")
+    else:
+        optimizer = AdamW(model.parameters(), lr=cfg.lr)
 
     # --- resume from checkpoint if one exists ---
     ckpt_path = cfg.resolved_checkpoint_path()
@@ -361,7 +376,7 @@ _INT_FIELDS = {
     "max_steps", "warmup_steps", "batch_size", "accum_steps",
     "max_length", "max_triples", "seed", "log_every", "checkpoint_every",
 }
-_FLOAT_FIELDS = {"lambda_q", "lambda_d", "lr", "max_grad_norm"}
+_FLOAT_FIELDS = {"lambda_q", "lambda_d", "lr", "p_lr", "max_grad_norm"}
 
 
 def parse_args():
