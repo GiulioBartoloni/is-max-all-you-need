@@ -65,7 +65,7 @@ def encode_queries(model, tokenizer, texts, device, batch_size, max_length):
             vecs = model.encode(enc["input_ids"], enc["attention_mask"], "query")
         vecs = vecs.float().cpu()
         for row in vecs:
-            nz = torch.nonzero(row, as_tuple=False).squeeze(-1)
+            nz = torch.nonzero(row > 1e-6, as_tuple=False).squeeze(-1)
             rows_idx.append(nz.numpy().astype(np.int32))
             rows_val.append(row[nz].numpy().astype(np.float32))
             indptr.append(indptr[-1] + nz.numel())

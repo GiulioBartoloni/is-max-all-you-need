@@ -77,7 +77,7 @@ def rows_to_sparse(vecs, topk_terms):
     """Convert a dense (batch, vocab) tensor into per-row (indices, values)."""
     out = []
     for row in vecs:
-        nz = torch.nonzero(row, as_tuple=False).squeeze(-1)
+        nz = torch.nonzero(row > 1e-6, as_tuple=False).squeeze(-1)
         vals = row[nz]
         if topk_terms and nz.numel() > topk_terms:
             keep = torch.topk(vals, topk_terms).indices
