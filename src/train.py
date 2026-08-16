@@ -350,8 +350,8 @@ def run_training(cfg: Config):
             step += 1
 
             if step % cfg.log_every == 0:
-                p_q = model.query_pool.p.item()
-                p_d = model.doc_pool.p.item()
+                p_q = model.query_pool.p.item() if hasattr(model.query_pool, "p") else float("nan")
+                p_d = model.doc_pool.p.item() if hasattr(model.doc_pool, "p") else float("nan")
                 row = (
                     step, loss.item(), ranking.item(),
                     flops_q.item(), flops_d.item(), lq, p_q, p_d
