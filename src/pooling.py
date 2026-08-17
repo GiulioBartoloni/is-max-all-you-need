@@ -141,7 +141,7 @@ class AttentionPooling(torch.nn.Module):
         scores = self.scorer(x)
 
         unsqueezed_mask = mask.unsqueeze(-1)
-        masked = scores.masked_fill(unsqueezed_mask == 0, -1e9)
+        masked = scores.masked_fill(unsqueezed_mask == 0, torch.finfo(scores.dtype).min)
 
         weights = torch.softmax(masked, dim=1)
         result = (x * weights).sum(dim=1)
