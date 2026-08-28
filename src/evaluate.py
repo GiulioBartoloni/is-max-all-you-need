@@ -4,11 +4,6 @@ evaluate.py -- retrieve against a sparse index and report MRR@10.
 Encodes the dev queries with the query pooling head, scores them against the
 sharded index written by index.py, and computes MRR@10 / Recall@k plus an
 estimate of the FLOPS efficiency metric (the x-axis of the main plot).
-
-Usage:
-    python evaluate.py --checkpoint /kaggle/working/ckpt_max_....pt \
-                       --index_dir /kaggle/working/index_max \
-                       --out_run   /kaggle/working/run_max.tsv
 """
 
 import argparse

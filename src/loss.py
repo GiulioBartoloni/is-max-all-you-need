@@ -1,3 +1,8 @@
+"""
+loss.py -- compute model loss
+
+"""
+
 import torch
 
 def margin_mse(pos_score, neg_score, teacher_pos_score, teacher_neg_score):
