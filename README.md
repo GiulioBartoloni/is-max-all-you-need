@@ -92,10 +92,10 @@ Fixed training setting: **DistilMSE** (distillation from pre-computed cross-enco
 
 ```bibtex
 @inproceedings{formal2022splade,
-  title     = {From Distillation to Hard Negative Sampling: Making Sparse Neural IR Models More Effective},
-  author    = {Formal, Thibault and Lassance, Carlos and Piwowarski, Benjamin and Clinchant, St{\'e}phane},
+  title = {From Distillation to Hard Negative Sampling: Making Sparse Neural IR Models More Effective},
+  author = {Formal, Thibault and Lassance, Carlos and Piwowarski, Benjamin and Clinchant, Stéphane},
   booktitle = {Proceedings of the 45th International ACM SIGIR Conference on Research and Development in Information Retrieval},
-  year      = {2022}
+  year = {2022}
 }
 ```
 
