@@ -88,17 +88,6 @@ Fixed training setting: **DistilMSE** (distillation from pre-computed cross-enco
 | `attention` | 15.4 | 60.6 | 83.6 | 45.5 |
 
 
-## Citation
-
-```bibtex
-@inproceedings{formal2022splade,
-  title = {From Distillation to Hard Negative Sampling: Making Sparse Neural IR Models More Effective},
-  author = {Formal, Thibault and Lassance, Carlos and Piwowarski, Benjamin and Clinchant, Stéphane},
-  booktitle = {Proceedings of the 45th International ACM SIGIR Conference on Research and Development in Information Retrieval},
-  year = {2022}
-}
-```
-
 ## Acknowledgements & license
 
 The reference implementation [`naver/splade`](https://github.com/naver/splade) is released under **CC BY-NC-SA 4.0** (non-commercial, share-alike). This is an academic course project; check those terms before any redistribution or reuse of derived material.
