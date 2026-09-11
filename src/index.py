@@ -1,12 +1,13 @@
 """
-index.py -- encode a passage collection into a sparse index.
+index.py -- encode a document collection into a sparse index.
 
-Loads a checkpoint produced by train.py, encodes passages with the document
-pooling head, and writes sharded sparse matrices (scipy CSR) to disk.
+The script loads a checkpoint of train.py and encodes the documents with the
+document pooling layer. It writes the vectors to disk as sparse matrices (scipy
+CSR), in shards. evaluate.py then searches those shards.
 
-Full collection is ~8.8M passages (hours on a T4). For the variant comparison
-you can index a fixed SUBSET with --max_docs / --doc_ids, which keeps the
-relative comparison valid at a fraction of the cost.
+The full MS MARCO collection has 8.8M passages, which takes hours on a T4. The
+comparison between the variants stays valid on a smaller collection, as long as
+every variant uses the same one: --max_docs or --doc_ids select that subset.
 
 Usage:
     python index.py --checkpoint /kaggle/working/ckpt_max_....pt \
@@ -30,7 +31,14 @@ from model import Splade
 
 
 def load_model(checkpoint_path, device):
-    """Rebuild the Splade model from a training checkpoint."""
+    """Rebuild the trained model from a checkpoint of train.py.
+
+    The checkpoint holds the config of its run, so the command line does not
+    have to repeat the variant and the backbone.
+
+    Returns:
+        The model in eval mode, the name of its backbone, and its variant.
+    """
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     cfg = ckpt.get("config", {})
     variant = cfg.get("variant", "max")
@@ -44,7 +52,12 @@ def load_model(checkpoint_path, device):
 
 
 def iter_collection(path, allowed=None, max_docs=None):
-    """Stream (pid, text) from collection.tsv, optionally filtered."""
+    """Yield (pid, text) from collection.tsv, one line at a time.
+
+    Args:
+        allowed: set of the pids to keep, or None for all of them.
+        max_docs: stop after this many documents, or None for all of them.
+    """
     n = 0
     with open(path) as f:
         for line in f:
@@ -61,6 +74,11 @@ def iter_collection(path, allowed=None, max_docs=None):
 
 
 def encode_batch(model, tokenizer, texts, device, max_length, use_fp16):
+    """Encode a batch of documents into a dense (batch, vocab) tensor on the CPU.
+
+    Half precision makes the encoding of the collection about two times faster,
+    and the values keep more than enough precision for a sparse vector.
+    """
     enc = tokenizer(texts, padding=True, truncation=True,
                     max_length=max_length, return_tensors="pt")
     enc = {k: v.to(device) for k, v in enc.items()}
@@ -74,7 +92,16 @@ def encode_batch(model, tokenizer, texts, device, max_length, use_fp16):
 
 
 def rows_to_sparse(vecs, topk_terms):
-    """Convert a dense (batch, vocab) tensor into per-row (indices, values)."""
+    """Turn a dense (batch, vocab) tensor into one (indices, values) pair per row.
+
+    Terms at or below 1e-6 are numerical noise from the saturation, not real
+    predictions. They must go, because a vector with 30k small terms is dense
+    and makes the search as slow as a full scan.
+
+    Args:
+        topk_terms: keep only the largest terms of a row, or 0 to keep all of
+            them.
+    """
     out = []
     for row in vecs:
         nz = torch.nonzero(row > 1e-6, as_tuple=False).squeeze(-1)
@@ -82,12 +109,22 @@ def rows_to_sparse(vecs, topk_terms):
         if topk_terms and nz.numel() > topk_terms:
             keep = torch.topk(vals, topk_terms).indices
             nz, vals = nz[keep], vals[keep]
+        # float16 halves the memory of the shard while it fills up.
         out.append((nz.numpy().astype(np.int32),
                     vals.numpy().astype(np.float16)))
     return out
 
 
 def save_shard(out_dir, shard_id, rows, pids, vocab_size):
+    """Write one shard as a CSR matrix, plus the pids of its rows.
+
+    A CSR matrix keeps the values of all the rows in one flat array. indptr
+    holds the position where each row starts, so it grows by the number of
+    terms of the row before it.
+
+    The values go back to float32 here, because scipy cannot multiply float16
+    matrices at search time.
+    """
     indptr = np.zeros(len(rows) + 1, dtype=np.int64)
     for i, (idx, _) in enumerate(rows):
         indptr[i + 1] = indptr[i] + len(idx)
@@ -106,7 +143,9 @@ def save_shard(out_dir, shard_id, rows, pids, vocab_size):
 
 
 def main():
-    p = argparse.ArgumentParser()
+    p = argparse.ArgumentParser(
+        description="Encode a collection into a sparse index."
+    )
     p.add_argument("--checkpoint", required=True)
     p.add_argument("--out_dir", required=True)
     p.add_argument("--collection_tsv", default=(
@@ -121,7 +160,8 @@ def main():
                    help="optional file with one pid per line to restrict to")
     p.add_argument("--topk_terms", type=int, default=0,
                    help="cap nonzero terms per doc (0 = keep all)")
-    p.add_argument("--fp16", action="store_true", default=True)
+    p.add_argument("--fp16", action=argparse.BooleanOptionalAction, default=True,
+                   help="encode in half precision on a GPU")
     args = p.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -143,6 +183,7 @@ def main():
     total, t0 = 0, time.time()
 
     def flush_batch():
+        """Encode what is in the batch buffer and move it into the shard."""
         nonlocal batch_texts, batch_pids, total
         if not batch_texts:
             return
@@ -161,10 +202,13 @@ def main():
         if len(batch_texts) >= args.batch_size:
             flush_batch()
 
+            # about every 50k documents, because total moves by a full batch
             if total % 50_000 < args.batch_size:
                 rate = total / max(time.time() - t0, 1e-9)
                 print(f"  {total:,} docs | {rate:.0f} docs/s", flush=True)
 
+            # A shard goes to disk as soon as it is full, so the run needs
+            # memory for one shard only.
             if len(shard_rows) >= args.shard_size:
                 path = save_shard(args.out_dir, shard_id, shard_rows,
                                   shard_pids, vocab_size)
@@ -172,6 +216,7 @@ def main():
                 shard_id += 1
                 shard_rows, shard_pids = [], []
 
+    # the last partial batch and the last partial shard
     flush_batch()
     if shard_rows:
         path = save_shard(args.out_dir, shard_id, shard_rows, shard_pids, vocab_size)

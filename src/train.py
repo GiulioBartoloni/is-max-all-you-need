@@ -1,13 +1,17 @@
 """
-train.py — SPLADE training loop for the pooling study.
+train.py -- train SPLADE with one pooling variant.
 
-The real-data version of the loop already validated by smoke_test.py. Runs on
-Kaggle (Tesla P100, ~9h sessions) and produces a checkpoint that index.py /
-evaluate.py consume.
+The script trains the model on the DistilMSE triples and writes the checkpoint
+that index.py and evaluate.py read. It also appends a CSV log with the parts of
+the loss and, for the p-norm variant, the value of the learned exponent.
 
-Placement: this file lives in src/ next to model.py, loss.py, data.py. The bare
-imports below assume src/ is on sys.path (the Kaggle setup cell does
-sys.path.insert(0, "/kaggle/working/repo/src")).
+The study ran on Kaggle, where a session stops after about 9 hours. A stopped
+session leaves a checkpoint behind, and a new run with the same settings
+continues from it until max_steps.
+
+The imports below have no package prefix, so src/ must be on sys.path. The
+Kaggle setup cell does:
+    sys.path.insert(0, "/kaggle/working/repo/src")
 
 Usage (CLI):
     python train.py --variant max --lambda_q 3e-4 --lambda_d 3e-4 --seed 1
@@ -20,6 +24,7 @@ Usage (notebook):
 import argparse
 import csv
 import os
+import pickle
 import random
 import time
 from dataclasses import dataclass, asdict, fields
@@ -39,6 +44,8 @@ from data import make_dataloader
 # --------------------------------------------------------------------------
 @dataclass
 class Config:
+    """Every setting of one run. It also goes into the checkpoint, as a dict."""
+
     # --- experiment knobs (what changes across the grid) ---
     variant: str = "max"            # sum | max | p-norm | attention
     lambda_q: float = 3e-4
@@ -47,16 +54,16 @@ class Config:
 
     # --- schedule ---
     max_steps: int = 35000
-    warmup_steps: int = 10000       # linear lambda ramp 0 -> target
+    warmup_steps: int = 10000       # steps of the ramp from 0 to the lambdas
     batch_size: int = 32
     accum_steps: int = 1            # effective batch = batch_size * accum_steps
     lr: float = 1e-4
-    p_lr: float = 1e-3
+    p_lr: float = 1e-3              # own learning rate for the p-norm exponent
     max_grad_norm: float = 1.0
 
     # --- tokenization / data volume ---
     max_length: int = 128
-    max_triples: int = 2_000_000    # cap triples loaded into RAM
+    max_triples: int = 2_000_000    # cap on the triples held in RAM
 
     # --- fixed model ---
     backbone: str = "distilbert-base-uncased"
@@ -65,7 +72,7 @@ class Config:
     log_every: int = 100
     checkpoint_every: int = 1000
 
-    # --- paths (Kaggle layout after confirmed data setup) ---
+    # --- paths (the Kaggle layout of the dataset) ---
     collection_tsv: str = (
         "/kaggle/input/datasets/giuliobartolonids/splade-data/irds/"
         "msmarco-passage/collectionandqueries/collection.tsv"
@@ -77,10 +84,16 @@ class Config:
     teacher_path: str = (
         "/kaggle/input/datasets/giuliobartolonids/splade-data/teacher.tsv"
     )
-    checkpoint_path: str = ""       # derived from run identity if left empty
+    checkpoint_path: str = ""       # empty -> derived from the run settings
     working_dir: str = "/kaggle/working"
 
     def resolved_checkpoint_path(self) -> str:
+        """Return the checkpoint path, and build a name for it if it is empty.
+
+        The name holds the variant, the two lambdas and the seed. Two runs of
+        the grid therefore cannot overwrite each other, and a repeated run
+        finds its own checkpoint again.
+        """
         if self.checkpoint_path:
             return self.checkpoint_path
         name = (
@@ -92,26 +105,28 @@ class Config:
 
 
 # --------------------------------------------------------------------------
-# Data adapters — direct TSV reads, no ir_datasets dependency
+# Data adapters -- direct TSV reads, no ir_datasets dependency
 # --------------------------------------------------------------------------
 class TsvDocstore:
-    """Random-access docstore built from collection.tsv (pid TAB text).
+    """Read a document of collection.tsv by its id, without the file in RAM.
 
-    Builds a byte-offset index on first access (~2 min for 8.8M docs).
-    Optionally saves/loads the index to/from a pickle file to skip
-    the build step on subsequent sessions.
+    The collection has 8.8M lines of "pid TAB text", which is too much to hold
+    next to the model. The class scans the file once for a {pid: byte offset}
+    index, and then every lookup is a seek plus one line.
+
+    The scan takes about 2 minutes. With an index_cache path, the index also
+    goes to a pickle file, and the next session loads it instead.
     """
 
     def __init__(self, collection_path, index_cache=None):
         self._path = collection_path
-        self._index_cache = index_cache   # path to save/load the pickle index
+        self._index_cache = index_cache
         self._index = {}
         self._built = False
 
-    def _build(self):
-        # try loading from cache first
+    def build(self):
+        """Load the offset index from the cache, or scan the file for it."""
         if self._index_cache and os.path.exists(self._index_cache):
-            import pickle
             with open(self._index_cache, "rb") as f:
                 self._index = pickle.load(f)
             self._built = True
@@ -121,6 +136,8 @@ class TsvDocstore:
         print("building docstore offset index (~2 min)...")
         t0 = time.time()
         with open(self._path, "rb") as f:
+            # A `for line in f` loop reads ahead into a buffer, which makes
+            # tell() point past the line. readline() keeps the two in step.
             while True:
                 offset = f.tell()
                 line = f.readline()
@@ -132,23 +149,21 @@ class TsvDocstore:
         print(f"index built: {len(self._index):,} docs in {time.time()-t0:.0f}s")
 
         if self._index_cache:
-            import pickle
             with open(self._index_cache, "wb") as f:
                 pickle.dump(self._index, f)
             print(f"index cached -> {self._index_cache}")
 
     def __getitem__(self, pid):
         if not self._built:
-            self._build()
+            self.build()
         with open(self._path, "rb") as f:
             f.seek(self._index[str(pid)])
-            line = f.readline().decode()
-            _, text = line.split("\t", 1)
+            _, text = f.readline().decode().split("\t", 1)
             return text.strip()
 
 
 def load_query_lookup(tsv_path):
-    """Build {qid: text} dict from a queries.*.tsv file."""
+    """Return {qid: text} from a queries.*.tsv file."""
     lookup = {}
     with open(tsv_path) as f:
         for line in f:
@@ -159,10 +174,14 @@ def load_query_lookup(tsv_path):
 
 
 def load_triples(path, max_triples=None):
-    """Parse Hofstatter teacher TSV: pos_score TAB neg_score TAB qid TAB pos_pid TAB neg_pid.
+    """Read the teacher triples of the DistilMSE file (Hofstatter et al.).
 
-    max_triples caps lines read into RAM. 35k steps * batch 32 ~ 1.12M
-    triples per pass, so 2M gives shuffle diversity without loading all 40M.
+    One line holds:
+        pos_score TAB neg_score TAB qid TAB pos_pid TAB neg_pid
+
+    max_triples caps the lines that go into RAM. A pass of 35k steps at batch
+    32 uses about 1.12M triples, so 2M gives enough diversity to the shuffle
+    without the full 40M file.
     """
     triples = []
     with open(path) as f:
@@ -180,6 +199,7 @@ def load_triples(path, max_triples=None):
 # Helpers
 # --------------------------------------------------------------------------
 def set_seed(seed):
+    """Seed every random source that a run uses, for a repeatable shuffle."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -187,11 +207,17 @@ def set_seed(seed):
 
 
 def to_device(batch, device):
+    """Move the tensors of a batch to the device and keep the other values."""
     return {k: v.to(device) if torch.is_tensor(v) else v
             for k, v in batch.items()}
 
 
 def save_checkpoint(path, step, model, optimizer, losses, cfg):
+    """Write the state of a run to one file.
+
+    The optimizer state is part of it, because the moments of AdamW must
+    survive the end of a Kaggle session.
+    """
     torch.save({
         "step": step,
         "model_state": model.state_dict(),
@@ -202,6 +228,7 @@ def save_checkpoint(path, step, model, optimizer, losses, cfg):
 
 
 def append_log_row(csv_path, row):
+    """Append one row to the CSV log, and write the header if the file is new."""
     header = ["step", "total", "ranking", "flops_q", "flops_d", "lambda", "p_q", "p_d"]
     exists = os.path.exists(csv_path)
     with open(csv_path, "a", newline="") as fh:
@@ -215,6 +242,11 @@ def append_log_row(csv_path, row):
 # Training
 # --------------------------------------------------------------------------
 def run_training(cfg: Config):
+    """Train one variant and return the path of its checkpoint.
+
+    If a checkpoint with that path is already there, the run continues from its
+    step instead of starting again.
+    """
     print(
         f"=== SPLADE training: variant={cfg.variant} "
         f"lambda_q={cfg.lambda_q:g} lambda_d={cfg.lambda_d:g} "
@@ -228,10 +260,10 @@ def run_training(cfg: Config):
 
     tokenizer = AutoTokenizer.from_pretrained(cfg.backbone)
 
-    # --- docstore (with session-level cache to skip the 2-min rebuild) ---
+    # --- docstore ---
     index_cache = os.path.join(cfg.working_dir, "docstore_index.pkl")
     doc_lookup = TsvDocstore(cfg.collection_tsv, index_cache=index_cache)
-    doc_lookup._build()   # build/load now so timing is visible before training
+    doc_lookup.build()   # build it now, so its cost does not hide in step 1
 
     # --- query lookup ---
     t0 = time.time()
@@ -253,9 +285,14 @@ def run_training(cfg: Config):
         max_length=cfg.max_length,
     )
 
-    # --- model / loss / optim ---
+    # --- model / loss / optimizer ---
     model = Splade(cfg.variant).to(device)
     loss_fn = SpladeLoss(cfg.lambda_q, cfg.lambda_d)
+
+    # The exponent p of the p-norm variant gets its own learning rate. It is a
+    # single scalar with a small gradient, so at the rate of the backbone it
+    # almost does not move. The other variants have no p, and then one group is
+    # enough.
     p_params, base_params = [], []
     for name, param in model.named_parameters():
         if name in ("query_pool.p", "doc_pool.p"):
@@ -264,7 +301,7 @@ def run_training(cfg: Config):
             base_params.append(param)
 
     if p_params:
-        optimizer= AdamW([
+        optimizer = AdamW([
             {"params": base_params, "lr": cfg.lr},
             {"params": p_params, "lr": cfg.p_lr},
         ])
@@ -272,7 +309,7 @@ def run_training(cfg: Config):
     else:
         optimizer = AdamW(model.parameters(), lr=cfg.lr)
 
-    # --- resume from checkpoint if one exists ---
+    # --- resume from a checkpoint if one is there ---
     ckpt_path = cfg.resolved_checkpoint_path()
     log_csv = ckpt_path.rsplit(".", 1)[0] + "_log.csv"
     start_step, losses = 0, []
@@ -280,7 +317,8 @@ def run_training(cfg: Config):
         ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model_state"])
         optimizer.load_state_dict(ckpt["optimizer_state"])
-        # load_state_dict restores the SAVED lrs -- re-apply the configured ones
+        # The optimizer state also holds the learning rates of the saved run.
+        # Put the configured ones back, so a resumed run can change them.
         optimizer.param_groups[0]["lr"] = cfg.lr
         if len(optimizer.param_groups) > 1:
             optimizer.param_groups[1]["lr"] = cfg.p_lr
@@ -300,26 +338,33 @@ def run_training(cfg: Config):
     optimizer.zero_grad()
     done = False
 
+    # One pass over the loader is not enough for max_steps, so the outer loop
+    # starts it again. Every pass reshuffles the triples.
     while not done:
         for batch in loader:
             batch = to_device(batch, device)
 
-            # encode query once, pos and neg separately
             pos_score, neg_score, q_vec, pos_vec, neg_vec = model(
                 batch["query_input_ids"], batch["query_attention_mask"],
                 batch["pos_input_ids"],   batch["pos_attention_mask"],
                 batch["neg_input_ids"],   batch["neg_attention_mask"],
             )
 
-            # stack pos+neg doc vectors — both are documents in the index
+            # The positive and the negative document are both documents of the
+            # index, so the FLOPS penalty sees them as one group.
             doc_vecs = torch.cat([pos_vec, neg_vec], dim=0)
 
-            # rebuild total with warmed lambdas (prevents 3M loss spike at step 0)
-            _total, ranking, flops_q, flops_d = loss_fn(
+            # loss_fn also returns a total, but that total holds the target
+            # lambdas. The lambdas here ramp up over warmup_steps instead, so
+            # only the parts of the loss come from loss_fn. Without the ramp,
+            # the dense vectors of step 0 give a loss of some millions, and the
+            # model escapes it with vectors of only zeros.
+            _, ranking, flops_q, flops_d = loss_fn(
                 pos_score, neg_score,
                 batch["teacher_pos"], batch["teacher_neg"],
                 q_vec, doc_vecs,
             )
+
             warm = 1.0 if cfg.warmup_steps <= 0 else min(
                 1.0, (step + 1) / cfg.warmup_steps
             )
@@ -327,11 +372,9 @@ def run_training(cfg: Config):
             ld = cfg.lambda_d * warm
             loss = ranking + lq * flops_q + ld * flops_d
 
+            # The gradients of accum_steps micro-batches add up in the same
+            # buffer, so each one contributes only its share of the loss.
             (loss / cfg.accum_steps).backward()
-
-            #TEMP
-            # if step % 20 == 0 and hasattr(model.query_pool, "p"):
-            #     print(f"step {step} | p_q={model.query_pool.p.item():.6f} | grad_q={model.query_pool.p.grad:.6f} | p_d={model.doc_pool.p.item():.6f} | grad_d={model.doc_pool.p.grad:.6f} |")
 
             micro += 1
             if micro % cfg.accum_steps != 0:
@@ -343,6 +386,9 @@ def run_training(cfg: Config):
                 )
             optimizer.step()
 
+            # A step can push p below 0, where the log space power mean
+            # breaks. The clamp holds it at 0.5, which is already past the
+            # mean end of the pooling family.
             with torch.no_grad():
                 for param in p_params:
                     param.clamp_(min=0.5)
@@ -350,6 +396,7 @@ def run_training(cfg: Config):
             step += 1
 
             if step % cfg.log_every == 0:
+                # Only the p-norm variant has a p; the others log a NaN.
                 p_q = model.query_pool.p.item() if hasattr(model.query_pool, "p") else float("nan")
                 p_d = model.doc_pool.p.item() if hasattr(model.doc_pool, "p") else float("nan")
                 row = (
@@ -381,26 +428,15 @@ def run_training(cfg: Config):
 # --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
-_INT_FIELDS = {
-    "max_steps", "warmup_steps", "batch_size", "accum_steps",
-    "max_length", "max_triples", "seed", "log_every", "checkpoint_every",
-}
-_FLOAT_FIELDS = {"lambda_q", "lambda_d", "lr", "p_lr", "max_grad_norm"}
-
-
 def parse_args():
+    """Give every field of Config a --flag, with its type and its default."""
     p = argparse.ArgumentParser(
         description="Train SPLADE for the pooling study."
     )
     defaults = Config()
     for f in fields(Config):
-        if f.name in _INT_FIELDS:
-            t = int
-        elif f.name in _FLOAT_FIELDS:
-            t = float
-        else:
-            t = str
-        p.add_argument(f"--{f.name}", type=t, default=getattr(defaults, f.name))
+        p.add_argument(f"--{f.name}", type=f.type,
+                       default=getattr(defaults, f.name))
     return p.parse_args()
 
 

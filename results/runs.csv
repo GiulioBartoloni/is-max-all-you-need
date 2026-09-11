@@ -3,8 +3,7 @@ id,variant,lambda_q,lambda_d,seed,lr,p_lr,steps,batch_size,max_length
 2,max,1e-3,1e-3,1,2e-5,,25000,32,128
 3,max,1e-2,1e-2,1,2e-5,,25000,32,128
 4,pnorm,1e-2,1e-2,1,2e-5,1e-3,25000,32,128
-5,pnorm,,,,,1e-3,,,,
-6,pnorm,,,,,1e-3,,,,
-4,attention,,,,,,,
-5,attention,,,,,,,
-6,attention,,,,,,,
+5,pnorm,1e-3,1e-3,1,2e-5,1e-3,25000,32,128
+6,pnorm,3e-2,3e-2,1,2e-5,1e-3,25000,32,128
+7,attention,1e-2,1e-2,1,2e-5,,25000,32,128
+8,sum,1e-2,1e-2,1,2e-5,,25000,32,128
