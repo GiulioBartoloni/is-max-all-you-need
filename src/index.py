@@ -1,20 +1,13 @@
 """
 index.py -- encode a document collection into a sparse index.
 
-The script loads a checkpoint of train.py and encodes the documents with the
-document pooling layer. It writes the vectors to disk as sparse matrices (scipy
-CSR), in shards. evaluate.py then searches those shards.
-
-The full MS MARCO collection has 8.8M passages, which takes hours on a T4. The
-comparison between the variants stays valid on a smaller collection, as long as
-every variant uses the same one: --max_docs or --doc_ids select that subset.
+The script loads a checkpoint of train.py and encodes the documents with the document pooling layer. 
+It writes the vectors to disk as sparse matrices (scipy CSR), in shards. 
+evaluate.py then searches those shards.
 
 Usage:
     python index.py --checkpoint /kaggle/working/ckpt_max_....pt \
                     --out_dir /kaggle/working/index_max
-
-    # reduced collection (fast, for the grid)
-    python index.py --checkpoint ... --out_dir ... --doc_ids /kaggle/working/subset_pids.txt
 """
 
 import argparse
@@ -33,8 +26,7 @@ from model import Splade
 def load_model(checkpoint_path, device):
     """Rebuild the trained model from a checkpoint of train.py.
 
-    The checkpoint holds the config of its run, so the command line does not
-    have to repeat the variant and the backbone.
+    The checkpoint holds the config of its run,.
 
     Returns:
         The model in eval mode, the name of its backbone, and its variant.
@@ -74,11 +66,7 @@ def iter_collection(path, allowed=None, max_docs=None):
 
 
 def encode_batch(model, tokenizer, texts, device, max_length, use_fp16):
-    """Encode a batch of documents into a dense (batch, vocab) tensor on the CPU.
-
-    Half precision makes the encoding of the collection about two times faster,
-    and the values keep more than enough precision for a sparse vector.
-    """
+    """Encode a batch of documents into a dense (batch, vocab) tensor on the CPU."""
     enc = tokenizer(texts, padding=True, truncation=True,
                     max_length=max_length, return_tensors="pt")
     enc = {k: v.to(device) for k, v in enc.items()}
@@ -93,10 +81,6 @@ def encode_batch(model, tokenizer, texts, device, max_length, use_fp16):
 
 def rows_to_sparse(vecs, topk_terms):
     """Turn a dense (batch, vocab) tensor into one (indices, values) pair per row.
-
-    Terms at or below 1e-6 are numerical noise from the saturation, not real
-    predictions. They must go, because a vector with 30k small terms is dense
-    and makes the search as slow as a full scan.
 
     Args:
         topk_terms: keep only the largest terms of a row, or 0 to keep all of
@@ -118,12 +102,10 @@ def rows_to_sparse(vecs, topk_terms):
 def save_shard(out_dir, shard_id, rows, pids, vocab_size):
     """Write one shard as a CSR matrix, plus the pids of its rows.
 
-    A CSR matrix keeps the values of all the rows in one flat array. indptr
-    holds the position where each row starts, so it grows by the number of
-    terms of the row before it.
+    A CSR matrix keeps the values of all the rows in one flat array. 
+    indptr holds the position where each row starts, so it grows by the number of terms of the row before it.
 
-    The values go back to float32 here, because scipy cannot multiply float16
-    matrices at search time.
+    The values go back to float32 here, because scipy cannot multiply float16 matrices at search time.
     """
     indptr = np.zeros(len(rows) + 1, dtype=np.int64)
     for i, (idx, _) in enumerate(rows):

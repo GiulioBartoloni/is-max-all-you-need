@@ -1,9 +1,7 @@
 """
-loss.py -- the SPLADE training objective.
+loss.py - the SPLADE training objective.
 
-The objective has two parts: the model learns the ranking from a cross-encoder
-teacher, and a penalty keeps the vectors sparse. Without that penalty the model
-fills the vectors with small values, which makes retrieval slow.
+The objective has two parts: the model learns the ranking from a cross-encoder teacher, and a penalty keeps the vectors sparse.
 """
 
 import torch
@@ -12,10 +10,9 @@ import torch
 def margin_mse(pos_score, neg_score, teacher_pos_score, teacher_neg_score):
     """Return the mean squared error of the student margin against the teacher.
 
-    The teacher scores come pre-computed from a cross-encoder. The student only
-    has to reproduce the difference between the positive and the negative
-    score. It does not have to reproduce the two absolute values, so the two
-    models do not need the same scale.
+    The teacher scores come pre-computed from a cross-encoder. 
+    The student only has to reproduce the difference between the positive and the negative score. 
+    It does not have to reproduce the two absolute values, so the two models do not need the same scale.
     """
     student_margin = pos_score - neg_score
     teacher_margin = teacher_pos_score - teacher_neg_score
@@ -27,18 +24,12 @@ def flops(vectors):
     """Return the FLOPS estimate of a batch of sparse vectors.
 
     For each vocabulary term, take its mean value over the batch and square it.
-    The sum over the terms estimates the work that an inverted index does for
-    one query-document pair. A count of the non-zero values measures the same
-    work, but a count has no gradient, so it cannot be part of a loss.
     """
     return (vectors.mean(dim=0) ** 2).sum()
 
 
 class SpladeLoss(torch.nn.Module):
     """The ranking loss plus a weighted FLOPS penalty on each side.
-
-    Queries and documents get their own weight, so the study can tune the two
-    sides apart. results/runs.csv holds the values of each run.
 
     Attributes:
         lambda_q: weight of the penalty on the query vectors.
@@ -52,11 +43,7 @@ class SpladeLoss(torch.nn.Module):
 
     def forward(self, pos_score, neg_score, teacher_pos_score, teacher_neg_score,
                 query_vectors, doc_vectors):
-        """Return the total loss and its three parts.
-
-        train.py logs the parts, and it also rebuilds the total itself while
-        the weights ramp up. See the warm-up in run_training.
-        """
+        """Return the total loss and its three parts."""
         ranking = margin_mse(pos_score, neg_score, teacher_pos_score, teacher_neg_score)
         query_flops = flops(query_vectors)
         doc_flops = flops(doc_vectors)

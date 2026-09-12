@@ -1,10 +1,9 @@
 """
-evaluate.py -- search a sparse index and report the retrieval metrics.
+evaluate.py - search a sparse index and report the retrieval metrics.
 
-The script encodes the dev queries with the query pooling layer and scores them
-against the shards that index.py wrote. It then prints MRR@10, Recall@100,
-Recall@1000 and an estimate of the FLOPS metric. Those numbers are the columns
-of results/metrics.csv, and FLOPS is the x-axis of the trade-off plot.
+The script encodes the dev queries with the query pooling layer and scores them against the shards that index.py wrote. 
+It then prints MRR@10, Recall@100, Recall@1000 and an estimate of the FLOPS metric. 
+Those numbers are the columns of results/metrics.csv, and FLOPS is the x-axis of the trade-off plot.
 
 Usage:
     python evaluate.py --checkpoint /kaggle/working/ckpt_max_....pt \
@@ -43,8 +42,7 @@ def load_queries(path, limit=0):
 def load_qrels(path):
     """Return {qid: set of relevant pids} from a qrels file.
 
-    One line of the MS MARCO qrels holds: qid, 0, pid, relevance. The dev set
-    marks about one relevant passage per query.
+    One line of the MS MARCO qrels holds: qid, 0, pid, relevance.
     """
     qrels = {}
     with open(path) as f:
@@ -61,8 +59,7 @@ def load_qrels(path):
 def encode_queries(model, tokenizer, texts, device, batch_size, max_length):
     """Encode the queries into one sparse CSR matrix of shape (n_queries, vocab).
 
-    The function builds the CSR form directly: the terms of a query go into the
-    flat arrays, and indptr marks where each query starts.
+    The function builds the CSR form directly: the terms of a query go into the flat arrays, and indptr marks where each query starts.
     """
     rows_idx, rows_val, indptr = [], [], [0]
     for i in range(0, len(texts), batch_size):
@@ -91,19 +88,16 @@ def encode_queries(model, tokenizer, texts, device, batch_size, max_length):
 def search(Q, index_dir, topk, chunk):
     """Score every query against every shard and keep the best topk documents.
 
-    The score of a query-document pair is their dot product. One sparse matrix
-    product therefore gives the scores of a chunk of queries against a whole
-    shard. Only one shard stays in memory at a time: the loop merges the
-    running best of each query with the best of the new shard.
+    The score of a query-document pair is their dot product. 
+    One sparse matrix product therefore gives the scores of a chunk of queries against a whole shard. 
+    Only one shard stays in memory at a time: the loop merges the running best of each query with the best of the new shard.
 
     Args:
         Q: the query matrix of encode_queries.
-        chunk: number of queries per matrix product. A large chunk is faster
-            but its dense score block is chunk * shard_size floats.
+        chunk: number of queries per matrix product.
 
     Returns:
-        The scores and the pids of the topk documents per query, both sorted by
-        score.
+        The scores and the pids of the topk documents per query, both sorted by score.
     """
     n_q = Q.shape[0]
     best_scores = np.full((n_q, topk), -np.inf, dtype=np.float32)
@@ -143,9 +137,7 @@ def search(Q, index_dir, topk, chunk):
 def mrr_at_k(qids, best_pids, qrels, k=10):
     """Return the mean reciprocal rank at k, and the number of judged queries.
 
-    A query counts 1/rank for its first relevant document in the top k, and 0
-    if it has none there. The loop skips the queries without a judgement:
-    their result is unknown, not wrong.
+    A query counts 1/rank for its first relevant document in the top k, and 0 if it has none there.
     """
     total, counted = 0.0, 0
     for i, qid in enumerate(qids):
@@ -163,8 +155,7 @@ def mrr_at_k(qids, best_pids, qrels, k=10):
 def recall_at_k(qids, best_pids, qrels, k):
     """Return the mean recall at k over the judged queries.
 
-    The recall of a query is the part of its relevant documents that the top k
-    holds.
+    The recall of a query is the part of its relevant documents that the top k holds.
     """
     total, counted = 0.0, 0
     for i, qid in enumerate(qids):
@@ -180,14 +171,12 @@ def recall_at_k(qids, best_pids, qrels, k):
 def estimate_flops(Q, index_dir, sample_shards=1):
     """Return the FLOPS metric: the mean number of terms that a pair shares.
 
-    For each vocabulary term, take the part of the queries and the part of the
-    documents in which the term is active. The product of the two parts is the
-    chance that both sides hold the term. The sum over the terms is then the
-    number of terms that a random query and a random document share. That
-    number is the work that the retrieval does for the pair.
+    For each vocabulary term, take the part of the queries and the part of the documents in which the term is active. 
+    The product of the two parts is the chance that both sides hold the term. 
+    The sum over the terms is then the number of terms that a random query and a random document share. 
+    That number is the work that the retrieval does for the pair.
 
-    The document side comes from a sample of the shards, because one shard
-    already gives a stable estimate.
+    The document side comes from a sample of the shards, because one shard already gives a stable estimate.
     """
     vocab = Q.shape[1]
     q_active = np.asarray((Q > 0).sum(axis=0)).ravel() / Q.shape[0]
@@ -272,7 +261,7 @@ def main():
         summary = args.out_run.rsplit(".", 1)[0] + "_metrics.json"
         with open(summary, "w") as f:
             json.dump({"variant": variant, "mrr@10": mrr,
-                       "recall@100": r100, "recall@1000": r1000,
+                       "recall@100": r100, "recall@1000": r1000,2
                        "flops": flops, "checkpoint": args.checkpoint}, f, indent=2)
         print(f"metrics written -> {summary}")
 

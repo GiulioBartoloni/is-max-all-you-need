@@ -1,8 +1,8 @@
 """
-model.py -- the SPLADE encoder.
+model.py - the SPLADE encoder.
 
-The model turns a text into one sparse vector over the BERT vocabulary. It
-then scores a query against a document with a dot product of two vectors.
+The model turns a text into one sparse vector over the BERT vocabulary.
+It then scores a query against a document with a dot product of two vectors.
 """
 
 import torch
@@ -16,18 +16,13 @@ class Splade(torch.nn.Module):
 
     A forward pass has three steps:
 
-    1. The DistilBERT masked language model head gives one vocabulary-sized
-       prediction per token.
-    2. log(1 + relu(logits)) drops the negative predictions and damps the
-       large ones. The relu makes the vector sparse: only the terms with a
-       positive prediction stay in it.
-    3. A pooling layer collapses the per-token predictions into one vector.
+    1.  The DistilBERT masked language model head gives one vocabulary-sized prediction per token.
+    2.  log(1 + relu(logits)) drops the negative predictions and damps the large ones. 
+        The relu makes the vector sparse: only the terms with a positive prediction stay in it.
+    3.  A pooling layer collapses the per-token predictions into one vector.
 
-    Queries and documents get two separate pooling layers. The two sides have
-    very different lengths, so the best pooling can also differ, which is one
-    of the questions of the study. The layers without parameters behave the
-    same on both sides.
-
+    Queries and documents get two separate pooling layers. 
+    
     Attributes:
         backbone: the DistilBERT masked language model.
         query_pool: pooling layer for the queries.
@@ -45,8 +40,7 @@ class Splade(torch.nn.Module):
         """Encode a batch of texts into sparse vectors of shape (batch, vocab).
 
         Args:
-            which: "query" for the query pooling layer, "doc" for the document
-                one.
+            which: "query" for the query pooling layer, "doc" for the document one.
         """
         logits = self.backbone(input_ids=input_ids,
                                attention_mask=attention_mask).logits
@@ -64,12 +58,10 @@ class Splade(torch.nn.Module):
                 neg_input_ids, neg_attention_mask):
         """Score one batch of training triples.
 
-        A triple is a query, a document that is relevant to it, and a document
-        that is not.
+        A triple is a query, a document that is relevant to it, and a document that is not.
 
         Returns:
-            The positive score, the negative score, and the three vectors. The
-            loss needs the vectors for its sparsity term.
+            The positive score, the negative score, and the three vectors. The loss needs the vectors for its sparsity term.
         """
         encoded_query = self.encode(query_input_ids, query_attention_mask, "query")
         encoded_pos = self.encode(pos_input_ids, pos_attention_mask, "doc")

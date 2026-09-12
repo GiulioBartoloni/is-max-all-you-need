@@ -1,8 +1,8 @@
 """
-data.py -- the training set of triples and its batching.
+data.py - the training set of triples and its batching.
 
-The teacher file gives triples of ids plus two teacher scores. This module
-turns them into batches of tokenized text that model.py can consume.
+The teacher file gives triples of ids plus two teacher scores. 
+This module turns them into batches of tokenized text that model.py can consume.
 """
 
 import torch
@@ -14,9 +14,7 @@ class TripleDataset(torch.utils.data.Dataset):
     Args:
         triples: list of (pos_score, neg_score, qid, pos_pid, neg_pid).
         query_lookup: query id -> query text.
-        doc_lookup: document id -> document text. A dict works, and so does the
-            on-disk docstore of train.py, because this class only needs
-            __getitem__.
+        doc_lookup: document id -> document text.
     """
 
     def __init__(self, triples, query_lookup, doc_lookup):
@@ -41,13 +39,11 @@ class TripleDataset(torch.utils.data.Dataset):
 def collate_fn_factory(tokenizer, max_length=128):
     """Build the collate_fn of a DataLoader.
 
-    A DataLoader gives its collate_fn the batch only, so the tokenizer comes
-    from this closure. The returned function takes a list of the dicts of
-    TripleDataset and returns one dict of batched tensors.
+    A DataLoader gives its collate_fn the batch only, so the tokenizer comes from here. 
+    The returned function takes a list of the dicts of TripleDataset and returns one dict of batched tensors.
 
-    The function tokenizes the queries, the positive documents and the negative
-    documents as three groups. Each group then gets the padding of its own
-    longest sequence, and the short queries stay short.
+    The function tokenizes the queries, the positive documents and the negative documents as three groups. 
+    Each group then gets the padding of its own longest sequence.
     """
     def collate_fn(batch):
         queries   = [ex["query"] for ex in batch]
